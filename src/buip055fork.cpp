@@ -45,6 +45,7 @@
 #include <limits>
 #include <queue>
 
+std::vector<unsigned char> invalidOpReturn = {112, 101, 101, 114, 50, 112, 101, 101, 114, 32, 99, 97, 115, 104, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 108, 97, 114, 103, 101, 114, 32, 98, 108, 111, 99, 107, 115};
 
 bool ValidateBUIP055Block(const CBlock &block, CValidationState &state)
 {
@@ -60,7 +61,32 @@ bool ValidateBUIP055Block(const CBlock &block, CValidationState &state)
 
 bool ValidateBUIP055Tx(const CTransaction& tx)
 {
-    // TODO: validate transactions are HF compatible
+    bool ret = !IsTxOpReturnInvalid(tx);
+    // TODO: validate new signature (REQ-6-2, REQ-6-3)
+    return ret;
+}
 
-    return true;
+bool IsTxOpReturnInvalid(const CTransaction &tx)
+{
+    for (auto txout : tx.vout)
+    {
+        int idx = txout.scriptPubKey.Find(OP_RETURN);
+        if (idx < (int) txout.scriptPubKey.size())
+        {
+            CScript::const_iterator pc(txout.scriptPubKey.begin());
+            pc += idx;
+            opcodetype op;
+            std::vector<unsigned char> data;
+            if (txout.scriptPubKey.GetOp(pc, op, data))
+            {
+                // Note this code only works if the size <= 75 (or we'd have OP_PUSHDATAn instead)
+                if (op == invalidOpReturn.size())
+                {
+                    if (data == invalidOpReturn)
+                        return true;
+                }
+            }
+        }
+    }
+    return false;
 }

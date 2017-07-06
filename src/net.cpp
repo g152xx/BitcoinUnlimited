@@ -11,7 +11,6 @@
 #include "net.h"
 
 #include "addrman.h"
-#include "bandb.h"
 #include "chainparams.h"
 #include "clientversion.h"
 #include "connmgr.h"
@@ -126,9 +125,6 @@ extern CCriticalSection cs_vUseDNSSeeds;
 extern CSemaphore *semOutbound;
 extern CSemaphore *semOutboundAddNode; // BU: separate semaphore for -addnodes
 boost::condition_variable messageHandlerCondition;
-
-// BU Parallel validation
-extern CSemaphore *semPV; // semaphore for parallel validation threads
 
 // BU  Connection Slot mitigation - used to determine how many connection attempts over time
 extern std::map<CNetAddr, ConnectionHistory> mapInboundConnectionTracker;
@@ -331,7 +327,6 @@ bool IsReachable(const CNetAddr &addr)
     return IsReachable(net);
 }
 
-void AddressCurrentlyConnected(const CService &addr) { addrman.Connected(addr); }
 // BU moved to globals.cpp
 // uint64_t CNode::nTotalBytesRecv = 0;
 // uint64_t CNode::nTotalBytesSent = 0;
@@ -1062,6 +1057,9 @@ void ThreadSocketHandler()
                     // remove from vNodes
                     vNodes.erase(remove(vNodes.begin(), vNodes.end(), pnode), vNodes.end());
 
+                    // inform connection manager
+                    connmgr->RemovedNode(pnode);
+
                     // release outbound grant (if any)
                     pnode->grantOutbound.Release();
 
@@ -1631,28 +1629,12 @@ void DumpAddresses()
     LogPrint("net", "Flushed %d addresses to peers.dat  %dms\n", addrman.size(), GetTimeMillis() - nStart);
 }
 
-void DumpBanlist()
-{
-    int64_t nStart = GetTimeMillis();
-
-    CBanDB bandb;
-    banmap_t banmap;
-    dosMan.GetBanned(banmap);
-    bandb.Write(banmap);
-
-    LogPrint(
-        "net", "Flushed %d banned node ips/subnets to banlist.dat  %dms\n", banmap.size(), GetTimeMillis() - nStart);
-}
-
 void DumpData()
 {
     DumpAddresses();
 
-    if (dosMan.BannedSetIsDirty())
-    {
-        DumpBanlist();
-        dosMan.SetBannedSetDirty(false);
-    }
+    // Request dos manager to write it's ban list to disk
+    dosMan.DumpBanlist();
 }
 
 void static ProcessOneShot()
@@ -2306,22 +2288,8 @@ void StartNode(boost::thread_group &threadGroup, CScheduler &scheduler)
         }
     }
 
-    uiInterface.InitMessage(_("Loading banlist..."));
-    // Load addresses from banlist.dat
-    nStart = GetTimeMillis();
-    CBanDB bandb;
-    banmap_t banmap;
-    if (bandb.Read(banmap))
-    {
-        dosMan.SetBanned(banmap); // thread save setter
-        dosMan.SetBannedSetDirty(false); // no need to write down, just read data
-        dosMan.SweepBanned(); // sweep out unused entries
-
-        LogPrint("net", "Loaded %d banned node ips/subnets from banlist.dat  %dms\n", banmap.size(),
-            GetTimeMillis() - nStart);
-    }
-    else
-        LogPrintf("Invalid or missing banlist.dat; recreating\n");
+    // ask dos manager to load banlist from disk (or recreate if missing/corrupt)
+    dosMan.LoadBanlist();
 
     fAddressesInitialized = true;
 
@@ -2421,11 +2389,6 @@ void NetCleanup()
     if (pnodeLocalHost)
         delete pnodeLocalHost;
     pnodeLocalHost = NULL;
-
-    // BU: clean up the parallel validation semaphore
-    if (semPV)
-        delete semPV;
-    semPV = NULL;
 
 #ifdef WIN32
     // Shutdown Windows Sockets
@@ -2749,7 +2712,7 @@ bool CAddrDB::Read(CAddrMan &addr, CDataStream &ssPeers)
 unsigned int ReceiveFloodSize() { return 1000 * GetArg("-maxreceivebuffer", DEFAULT_MAXRECEIVEBUFFER); }
 unsigned int SendBufferSize() { return 1000 * GetArg("-maxsendbuffer", DEFAULT_MAXSENDBUFFER); }
 CNode::CNode(SOCKET hSocketIn, const CAddress &addrIn, const std::string &addrNameIn, bool fInboundIn)
-    : ssSend(SER_NETWORK, INIT_PROTO_VERSION), id(CConnMgr::nextNodeId()), addrKnown(5000, 0.001),
+    : ssSend(SER_NETWORK, INIT_PROTO_VERSION), id(connmgr->NextNodeId()), addrKnown(5000, 0.001),
       filterInventoryKnown(50000, 0.000001)
 {
     nServices = 0;
@@ -2800,6 +2763,10 @@ CNode::CNode(SOCKET hSocketIn, const CAddress &addrIn, const std::string &addrNa
     thinBlockWaitingForTxns = -1; // BUIP010 Xtreme Thinblocks
     addrFromPort = 0; // BU
     nLocalThinBlockBytes = 0;
+
+    nMisbehavior = 0;
+    fShouldBan = false;
+    fCurrentlyConnected = false;
 
     // BU instrumentation
     std::string xmledName;
@@ -2861,6 +2828,10 @@ CNode::~CNode()
     // BUIP010 - Xtreme Thinblocks - end section
 
     addrFromPort = 0;
+
+    // Update addrman timestamp
+    if (nMisbehavior == 0 && fCurrentlyConnected)
+        addrman.Connected(addr);
 
     GetNodeSignals().FinalizeNode(GetId());
 }

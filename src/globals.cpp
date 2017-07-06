@@ -19,9 +19,8 @@
 #include "leakybucket.h"
 #include "main.h"
 #include "miner.h"
-#include "net.h"
+#include "netbase.h"
 #include "nodestate.h"
-#include "parallel.h"
 #include "policy/policy.h"
 #include "primitives/block.h"
 #include "requestManager.h"
@@ -100,13 +99,6 @@ CCriticalSection cs_mapInboundConnectionTracker;
 CCriticalSection cs_vOneShots;
 
 CCriticalSection cs_statMap;
-
-// critical sections from expedited.cpp
-CCriticalSection cs_xpedited;
-
-// semaphore for parallel validation threads
-CCriticalSection cs_semPV;
-CSemaphore *semPV;
 
 deque<string> vOneShots;
 std::map<CNetAddr, ConnectionHistory> mapInboundConnectionTracker;
@@ -259,10 +251,6 @@ CTweak<uint64_t> checkScriptDays("blockchain.checkScriptDays",
 
 CRequestManager requester; // after the maps nodes and tweaks
 
-// Parallel Validation Variables
-CParallelValidation PV; // Singleton class
-CAllScriptCheckQueues allScriptCheckQueues; // Singleton class
-
 CStatHistory<unsigned int> txAdded; //"memPool/txAdded");
 CStatHistory<uint64_t, MinValMax<uint64_t> > poolSize; // "memPool/size",STAT_OP_AVE);
 CStatHistory<uint64_t> recvAmt;
@@ -272,8 +260,3 @@ CStatHistory<uint64_t> nBlockValidationTime("blockValidationTime", STAT_OP_MAX |
 CCriticalSection cs_blockvalidationtime;
 
 CThinBlockData thindata; // Singleton class
-
-// Expedited blocks
-std::vector<CNode *> xpeditedBlk; // (256,(CNode*)NULL);    // Who requested expedited blocks from us
-std::vector<CNode *> xpeditedBlkUp; //(256,(CNode*)NULL);  // Who we requested expedited blocks from
-std::vector<CNode *> xpeditedTxn; // (256,(CNode*)NULL);

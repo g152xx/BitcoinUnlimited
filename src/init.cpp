@@ -17,6 +17,7 @@
 #include "chainparams.h"
 #include "checkpoints.h"
 #include "compat/sanity.h"
+#include "connmgr.h"
 #include "consensus/validation.h"
 #include "dosman.h"
 #include "httpserver.h"
@@ -164,8 +165,11 @@ static boost::scoped_ptr<ECCVerifyHandle> globalVerifyHandle;
 void Interrupt(boost::thread_group& threadGroup)
 {
     // Interrupt Parallel Block Validation threads if there are any running.
-    PV.StopAllValidationThreads();
-    PV.WaitForAllValidationThreadsToStop();
+    if (PV)
+    {
+        PV->StopAllValidationThreads();
+        PV->WaitForAllValidationThreadsToStop();
+    }
 
     InterruptHTTPServer();
     InterruptHTTPRPC();
@@ -674,20 +678,14 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     fCheckBlockIndex = GetBoolArg("-checkblockindex", chainparams.DefaultConsistencyChecks());
     fCheckpointsEnabled = GetBoolArg("-checkpoints", DEFAULT_CHECKPOINTS_ENABLED);
 
+    connmgr->HandleCommandLine();
+    dosMan.HandleCommandLine();
+
     // mempool limits
     int64_t nMempoolSizeMax = GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000;
     int64_t nMempoolSizeMin = GetArg("-limitdescendantsize", DEFAULT_DESCENDANT_SIZE_LIMIT) * 1000 * 40;
     if (nMempoolSizeMax < 0 || nMempoolSizeMax < nMempoolSizeMin)
         return InitError(strprintf(_("-maxmempool must be at least %d MB"), std::ceil(nMempoolSizeMin / 1000000.0)));
-
-    // -par=0 means autodetect, but nScriptCheckThreads==0 means no concurrency
-    nScriptCheckThreads = GetArg("-par", DEFAULT_SCRIPTCHECK_THREADS);
-    if (nScriptCheckThreads <= 0)
-        nScriptCheckThreads += GetNumCores();
-    if (nScriptCheckThreads <= 1)
-        nScriptCheckThreads = 0;
-    else if (nScriptCheckThreads > MAX_SCRIPTCHECK_THREADS)
-        nScriptCheckThreads = MAX_SCRIPTCHECK_THREADS;
 
     fServer = GetBoolArg("-server", false);
 
@@ -821,10 +819,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     LogPrintf("Using at most %i connections (%i file descriptors available)\n", nMaxConnections, nFD);
     std::ostringstream strErrors;
 
-    LogPrintf("Using %u threads for script verification\n", nScriptCheckThreads);
-    // BU: parallel block validation - begin
-    AddAllScriptCheckQueuesAndThreads(nScriptCheckThreads, &threadGroup); // This initializes and creates 4 separate script thread queues and thread pools.
-    // BU: parallel block validation - end
+    // -par=0 means autodetect, but passing 0 to the CParallelValidation constructor means no concurrency
+    int nPVThreads = GetArg("-par", DEFAULT_SCRIPTCHECK_THREADS);
+    if (nPVThreads <= 0)
+        nPVThreads += GetNumCores();
+
+    // BU: create the parallel block validator
+    PV.reset(new CParallelValidation(nPVThreads, &threadGroup));
 
     // Start the lightweight task scheduler thread
     CScheduler::Function serviceLoop = boost::bind(&CScheduler::serviceQueue, &scheduler);

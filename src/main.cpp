@@ -13,6 +13,7 @@
 #include "chainparams.h"
 #include "checkpoints.h"
 #include "checkqueue.h"
+#include "connmgr.h"
 #include "consensus/consensus.h"
 #include "consensus/merkle.h"
 #include "consensus/validation.h"
@@ -71,7 +72,6 @@ CBlockIndex *pindexBestHeader = NULL;
 int64_t nTimeBestReceived = 0;
 // BU moved CWaitableCriticalSection csBestBlock;
 // BU moved CConditionVariable cvBlockChange;
-int nScriptCheckThreads = 0;
 bool fImporting = false;
 bool fReindex = false;
 bool fTxIndex = false;
@@ -284,11 +284,6 @@ void FinalizeNode(NodeId nodeid)
 
     if (state->fSyncStarted)
         nSyncStarted--;
-
-    if (state->nMisbehavior == 0 && state->fCurrentlyConnected)
-    {
-        AddressCurrentlyConnected(state->address);
-    }
 
     BOOST_FOREACH (const QueuedBlock &entry, state->vBlocksInFlight)
     {
@@ -621,11 +616,15 @@ bool CanDirectFetch(const Consensus::Params &consensusParams)
 
 bool GetNodeStateStats(NodeId nodeid, CNodeStateStats &stats)
 {
+    CNodeRef node(connmgr->FindNodeFromId(nodeid));
+    if (!node)
+        return false;
+
     LOCK(cs_main);
     CNodeState *state = State(nodeid);
     if (state == NULL)
         return false;
-    stats.nMisbehavior = state->nMisbehavior;
+    stats.nMisbehavior = node->nMisbehavior;
     stats.nSyncHeight = state->pindexBestKnownBlock ? state->pindexBestKnownBlock->nHeight : -1;
     stats.nCommonHeight = state->pindexLastCommonBlock ? state->pindexLastCommonBlock->nHeight : -1;
     BOOST_FOREACH (const QueuedBlock &queue, state->vBlocksInFlight)
@@ -689,7 +688,7 @@ bool AddOrphanTx(const CTransaction &tx, NodeId peer) EXCLUSIVE_LOCKS_REQUIRED(c
     AssertLockHeld(cs_orphancache);
 
     if (mapOrphanTransactions.empty())
-        nBytesOrphanPool = 0;
+        DbgAssert(nBytesOrphanPool == 0, nBytesOrphanPool = 0);
 
     uint256 hash = tx.GetHash();
     if (mapOrphanTransactions.count(hash))
@@ -2498,15 +2497,14 @@ bool ConnectBlock(const CBlock &block,
 
     // Get the next available mutex and the associated scriptcheckqueue. Then lock this thread
     // with the mutex so that the checking of inputs can be done with the chosen scriptcheckqueue.
-    CCheckQueue<CScriptCheck> *pScriptQueue = NULL;
-    pScriptQueue = allScriptCheckQueues.GetScriptCheckQueue();
+    CCheckQueue<CScriptCheck> *pScriptQueue(PV->GetScriptCheckQueue());
 
     // Aquire the control that is used to wait for the script threads to finish. Do this after aquiring the
     // scoped lock to ensure the scriptqueue is free and available.
-    CCheckQueueControl<CScriptCheck> control(fScriptChecks && nScriptCheckThreads ? pScriptQueue : NULL);
+    CCheckQueueControl<CScriptCheck> control(fScriptChecks && PV->ThreadCount() ? pScriptQueue : NULL);
 
     // Initialize a PV session.
-    if (!PV.Initialize(this_id, pindex, fParallel))
+    if (!PV->Initialize(this_id, pindex, fParallel))
         return false;
 
     /*********************************************************************************************
@@ -2518,7 +2516,7 @@ bool ConnectBlock(const CBlock &block,
     // Begin Section for Boost Scope Guard
     {
         // Scope guard to make sure cs_main is set and resources released if we encounter an exception.
-        BOOST_SCOPE_EXIT(&PV, &fParallel) { PV.SetLocks(fParallel); }
+        BOOST_SCOPE_EXIT(&PV, &fParallel) { PV->SetLocks(fParallel); }
         BOOST_SCOPE_EXIT_END
 
 
@@ -2527,7 +2525,7 @@ bool ConnectBlock(const CBlock &block,
         bool inVerifiedCache;
         // When in parallel mode then unlock cs_main for this loop to give any other threads
         // a chance to process in parallel. This is crucial for parallel validation to work.
-        // NOTE: the only place where cs_main is needed is if we hit PV.ChainWorkHasChanged, which
+        // NOTE: the only place where cs_main is needed is if we hit PV->ChainWorkHasChanged, which
         //       internally grabs the cs_main lock when needed.
         for (unsigned int i = 0; i < block.vtx.size(); i++)
         {
@@ -2548,7 +2546,7 @@ bool ConnectBlock(const CBlock &block,
                     // and updates the UTXO first, then we may end up here with missing inputs.  Therefore we checke to
                     // see
                     // if the chainwork has advanced or if we recieved a quit and if so return without DOSing the node.
-                    if (PV.ChainWorkHasChanged(nStartingChainWork) || PV.QuitReceived(this_id, fParallel))
+                    if (PV->ChainWorkHasChanged(nStartingChainWork) || PV->QuitReceived(this_id, fParallel))
                     {
                         return false;
                     }
@@ -2605,7 +2603,7 @@ bool ConnectBlock(const CBlock &block,
                         bool fCacheResults = fJustCheck; /* Don't cache results if we're actually connecting blocks
                                                             (still consult the cache, though) */
                         if (!CheckInputs(tx, state, viewTempCache, fScriptChecks, flags, fCacheResults,
-                                &resourceTracker, nScriptCheckThreads ? &vChecks : NULL))
+                                &resourceTracker, PV->ThreadCount() ? &vChecks : NULL))
                         {
                             return error("ConnectBlock(): CheckInputs on %s failed with %s", tx.GetHash().ToString(),
                                 FormatStateMessage(state));
@@ -2629,7 +2627,7 @@ bool ConnectBlock(const CBlock &block,
             vPos.push_back(std::make_pair(tx.GetHash(), pos));
             pos.nTxOffset += ::GetSerializeSize(tx, SER_DISK, CLIENT_VERSION);
 
-            if (PV.QuitReceived(this_id, fParallel))
+            if (PV->QuitReceived(this_id, fParallel))
             {
                 return false;
             }
@@ -2644,7 +2642,7 @@ bool ConnectBlock(const CBlock &block,
             // if we end up here then the signature verification failed and we must re-lock cs_main before returning.
             return state.DoS(100, false);
         }
-        if (PV.QuitReceived(this_id, fParallel))
+        if (PV->QuitReceived(this_id, fParallel))
         {
             return false;
         }
@@ -2668,13 +2666,13 @@ bool ConnectBlock(const CBlock &block,
     } // cs_main is re-aquired automatically as we go out of scope from the BOOST scope guard
 
     // Last check for chain work just in case the thread manages to get here before being terminated.
-    if (PV.ChainWorkHasChanged(nStartingChainWork) || PV.QuitReceived(this_id, fParallel))
+    if (PV->ChainWorkHasChanged(nStartingChainWork) || PV->QuitReceived(this_id, fParallel))
     {
         return false; // no need to lock cs_main before returning as it should already be locked.
     }
 
     // Quit any competing threads may be validating which have the same previous block before updating the UTXO.
-    PV.QuitCompetingThreads(block.GetBlockHeader().hashPrevBlock);
+    PV->QuitCompetingThreads(block.GetBlockHeader().hashPrevBlock);
 
     // Flush the temporary UTXO view to the base view (the in memory UTXO main cache)
     int64_t nUpdateCoinsTimeBegin = GetTimeMicros();
@@ -2744,7 +2742,7 @@ bool ConnectBlock(const CBlock &block,
     nTimeCallbacks += nTime6 - nTime5;
     LogPrint("bench", "    - Callbacks: %.2fms [%.2fs]\n", 0.001 * (nTime6 - nTime5), nTimeCallbacks * 0.000001);
 
-    PV.Cleanup(block, pindex); // NOTE: this must be run whether in fParallel or not!
+    PV->Cleanup(block, pindex); // NOTE: this must be run whether in fParallel or not!
 
     // Delete hashes from unverified and preverified sets that will no longer be needed after the block is accepted.
     {
@@ -3291,10 +3289,10 @@ static bool ActivateBestChainStep(CValidationState &state,
         // point just after the chaintip had already been advanced.  If that were to happen then it could initiate a
         // re-org when in fact a Quit had already been called on this thread.  So we do a check if Quit was previously
         // called and return if true.
-        if (PV.QuitReceived(this_id, fParallel))
+        if (PV->QuitReceived(this_id, fParallel))
             return false;
 
-        PV.IsReorgInProgress(this_id, true, fParallel); // indicate that this thread has now initiated a re-org
+        PV->IsReorgInProgress(this_id, true, fParallel); // indicate that this thread has now initiated a re-org
 
         // Disconnect active blocks which are no longer in the best chain.
         if (!DisconnectTip(state, chainparams.GetConsensus()))
@@ -3306,7 +3304,7 @@ static bool ActivateBestChainStep(CValidationState &state,
         // to be sure we are not waiting on script threads to finish we can issue the termination here.
         if (fParallel && !fBlocksDisconnected)
         {
-            PV.StopAllValidationThreads(this_id);
+            PV->StopAllValidationThreads(this_id);
         }
         fBlocksDisconnected = true;
     }
@@ -5636,7 +5634,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
     {
         if (pfrom->nVersion >= NO_BLOOM_VERSION)
         {
-            dosMan.Misbehaving(pfrom->GetId(), 100);
+            dosMan.Misbehaving(pfrom, 100);
             return false;
         }
         else
@@ -5672,8 +5670,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
             // ban peers older than this proto version
             pfrom->PushMessage(NetMsgType::REJECT, strCommand, REJECT_OBSOLETE,
                 strprintf("Protocol Version must be %d or greater", MIN_PEER_PROTO_VERSION));
-            LOCK(cs_main);
-            dosMan.Misbehaving(pfrom->GetId(), 100);
+            dosMan.Misbehaving(pfrom, 100);
             return error("Using obsolete protocol version %i - banning peer=%d version=%s ip=%s", pfrom->nVersion,
                 pfrom->GetId(), pfrom->cleanSubVer, pfrom->addrName.c_str());
         }
@@ -5813,10 +5810,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
 
         // Mark this node as currently connected, so we update its timestamp later.
         if (pfrom->fNetworkNode)
-        {
-            LOCK(cs_main);
-            State(pfrom->GetId())->fCurrentlyConnected = true;
-        }
+            pfrom->fCurrentlyConnected = true;
 
         if (pfrom->nVersion >= SENDHEADERS_VERSION)
         {
@@ -5874,7 +5868,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
             return true;
         if (vAddr.size() > 1000)
         {
-            dosMan.Misbehaving(pfrom->GetId(), 20);
+            dosMan.Misbehaving(pfrom, 20);
             return error("message addr size() = %u", vAddr.size());
         }
 
@@ -5949,8 +5943,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
         //   Validate that INVs are a valid type and not null.
         if (vInv.size() > MAX_INV_SZ || vInv.empty())
         {
-            LOCK(cs_main);
-            dosMan.Misbehaving(pfrom->GetId(), 20);
+            dosMan.Misbehaving(pfrom, 20);
             return error("message inv size() = %u", vInv.size());
         }
         for (unsigned int nInv = 0; nInv < vInv.size(); nInv++)
@@ -5958,8 +5951,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
             const CInv &inv = vInv[nInv];
             if (!((inv.type == MSG_TX) || (inv.type == MSG_BLOCK)) || inv.hash.IsNull())
             {
-                LOCK(cs_main);
-                dosMan.Misbehaving(pfrom->GetId(), 20);
+                dosMan.Misbehaving(pfrom, 20);
                 return error("message inv invalid type = %u or is null hash %s", inv.type, inv.hash.ToString());
             }
         }
@@ -6022,7 +6014,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
 
             if (pfrom->nSendSize > (SendBufferSize() * 2))
             {
-                dosMan.Misbehaving(pfrom->GetId(), 50);
+                dosMan.Misbehaving(pfrom, 50);
                 return error("send buffer size() = %u", pfrom->nSendSize);
             }
         }
@@ -6036,7 +6028,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
         // BU check size == 0 to be intolerant of an empty and useless request
         if ((vInv.size() > MAX_INV_SZ) || (vInv.size() == 0))
         {
-            dosMan.Misbehaving(pfrom->GetId(), 20);
+            dosMan.Misbehaving(pfrom, 20);
             return error("message getdata size() = %u", vInv.size());
         }
 
@@ -6047,7 +6039,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
             if (!((inv.type == MSG_TX) || (inv.type == MSG_BLOCK) || (inv.type == MSG_FILTERED_BLOCK) ||
                     (inv.type == MSG_THINBLOCK) || (inv.type == MSG_XTHINBLOCK)))
             {
-                dosMan.Misbehaving(pfrom->GetId(), 20);
+                dosMan.Misbehaving(pfrom, 20);
                 return error("message inv invalid type = %u", inv.type);
             }
             // inv.hash does not need validation, since SHA2556 hash can be any value
@@ -6215,6 +6207,15 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
                 for (std::set<uint256>::iterator mi = itByPrev->second.begin(); mi != itByPrev->second.end(); ++mi)
                 {
                     const uint256 &orphanHash = *mi;
+
+                    // Make sure we actually have an entry on the orphan cache. While this should never fail because
+                    // we always erase orphans and any mapOrphanTransactionsByPrev at the same time, still we need to
+                    // be sure.
+                    bool fOk = true;
+                    DbgAssert(mapOrphanTransactions.count(orphanHash), fOk = false);
+                    if (!fOk)
+                        continue;
+
                     const CTransaction &orphanTx = mapOrphanTransactions[orphanHash].tx;
                     NodeId fromPeer = mapOrphanTransactions[orphanHash].fromPeer;
                     bool fMissingInputs2 = false;
@@ -6310,7 +6311,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
                 pfrom->PushMessage(NetMsgType::REJECT, strCommand, (unsigned char)state.GetRejectCode(),
                     state.GetRejectReason().substr(0, MAX_REJECT_MESSAGE_LENGTH), inv.hash);
             if (nDoS > 0)
-                dosMan.Misbehaving(pfrom->GetId(), nDoS);
+                dosMan.Misbehaving(pfrom, nDoS);
         }
         FlushStateToDisk(state, FLUSH_STATE_PERIODIC);
     }
@@ -6324,7 +6325,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
         unsigned int nCount = ReadCompactSize(vRecv);
         if (nCount > MAX_HEADERS_RESULTS)
         {
-            dosMan.Misbehaving(pfrom->GetId(), 20);
+            dosMan.Misbehaving(pfrom, 20);
             return error("headers message size = %u", nCount);
         }
         headers.resize(nCount);
@@ -6375,7 +6376,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
                 if (state.IsInvalid(nDoS))
                 {
                     if (nDoS > 0)
-                        dosMan.Misbehaving(pfrom->GetId(), nDoS);
+                        dosMan.Misbehaving(pfrom, nDoS);
                     return error("invalid header received");
                 }
             }
@@ -6396,7 +6397,25 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
 
         bool fCanDirectFetch = CanDirectFetch(chainparams.GetConsensus());
         CNodeState *nodestate = State(pfrom->GetId());
-        nodestate->fFirstHeadersReceived = true;
+
+        // During the initial peer handshake we must receive the initial headers which should be greater
+        // than or equal to our block height at the time of requesting GETHEADERS. This is because the peer has
+        // advertised a height >= to our own. Furthermore, because the headers max returned is as much as 2000 this
+        // could not be a mainnet re-org.
+        if (!nodestate->fFirstHeadersReceived)
+        {
+            // We want to make sure that the peer doesn't just send us any old valid header. The block height of the
+            // last header they send us should be equal to our block height at the time we made the GETHEADERS request.
+            if (pindexLast && nodestate->nFirstHeadersExpectedHeight <= pindexLast->nHeight)
+            {
+                nodestate->fFirstHeadersReceived = true;
+                LogPrint("net", "Initial headers received for peer=%s\n", pfrom->GetLogName());
+            }
+
+            // Allow for very large reorgs (> 2000 blocks) on the nol test chain or other test net.
+            if (Params().NetworkIDString() != "main" && Params().NetworkIDString() != "regtest")
+                nodestate->fFirstHeadersReceived = true;
+        }
 
         // update the syncd status.  This should come before we make calls to requester.AskFor().
         IsChainNearlySyncdInit();
@@ -6457,8 +6476,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
     {
         if (!pfrom->ThinBlockCapable())
         {
-            LOCK(cs_main);
-            dosMan.Misbehaving(pfrom->GetId(), 100);
+            dosMan.Misbehaving(pfrom, 100);
             return error("Thinblock message received from a non thinblock node, peer=%d", pfrom->GetId());
         }
 
@@ -6477,8 +6495,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
             {
                 if (pfrom->nGetXthinCount >= 20)
                 {
-                    LOCK(cs_main);
-                    dosMan.Misbehaving(pfrom->GetId(), 100); // If they exceed the limit then disconnect them
+                    dosMan.Misbehaving(pfrom, 100); // If they exceed the limit then disconnect them
                     return error("requesting too many get_xthin");
                 }
             }
@@ -6491,8 +6508,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
         // Message consistency checking
         if (!((inv.type == MSG_XTHINBLOCK) || (inv.type == MSG_THINBLOCK)) || inv.hash.IsNull())
         {
-            LOCK(cs_main);
-            dosMan.Misbehaving(pfrom->GetId(), 100);
+            dosMan.Misbehaving(pfrom, 100);
             return error("invalid get_xthin type=%u hash=%s", inv.type, inv.hash.ToString());
         }
 
@@ -6504,7 +6520,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
             BlockMap::iterator mi = mapBlockIndex.find(inv.hash);
             if (mi == mapBlockIndex.end())
             {
-                dosMan.Misbehaving(pfrom->GetId(), 100);
+                dosMan.Misbehaving(pfrom, 100);
                 return error("Peer %s (%d) requested nonexistent block %s", pfrom->addrName.c_str(), pfrom->id,
                     inv.hash.ToString());
             }
@@ -6538,8 +6554,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
         {
             if (!HandleExpeditedBlock(vRecv, pfrom))
             {
-                LOCK(cs_main);
-                dosMan.Misbehaving(pfrom->GetId(), 5);
+                dosMan.Misbehaving(pfrom, 5);
                 return false;
             }
         }
@@ -6553,8 +6568,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
         // If we never sent a VERACK message then we should not get a BUVERSION message.
         if (!pfrom->fVerackSent)
         {
-            LOCK(cs_main);
-            dosMan.Misbehaving(pfrom->GetId(), 100);
+            dosMan.Misbehaving(pfrom, 100);
             return error("BUVERSION received but we never sent a VERACK message - banning peer=%d version=%s ip=%s",
                 pfrom->GetId(), pfrom->cleanSubVer, pfrom->addrName.c_str());
         }
@@ -6563,8 +6577,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
         {
             pfrom->PushMessage(
                 NetMsgType::REJECT, strCommand, REJECT_DUPLICATE, std::string("Duplicate BU version message"));
-            LOCK(cs_main);
-            dosMan.Misbehaving(pfrom->GetId(), 100);
+            dosMan.Misbehaving(pfrom, 100);
             return error("Duplicate BU version message received from peer=%d version=%s ip=%s", pfrom->GetId(),
                 pfrom->cleanSubVer, pfrom->addrName.c_str());
         }
@@ -6579,8 +6592,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
         // If we never sent a BUVERSION message then we should not get a VERACK message.
         if (!pfrom->fBUVersionSent)
         {
-            LOCK(cs_main);
-            dosMan.Misbehaving(pfrom->GetId(), 100);
+            dosMan.Misbehaving(pfrom, 100);
             return error("BUVERACK received but we never sent a BUVERSION message - banning peer=%d version=%s ip=%s",
                 pfrom->GetId(), pfrom->cleanSubVer, pfrom->addrName.c_str());
         }
@@ -6637,7 +6649,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
         // Message consistency checking
         // NOTE: consistency checking is handled by checkblock() which is called during
         //       ProcessNewBlock() during HandleBlockMessage.
-        PV.HandleBlockMessage(pfrom, strCommand, block, inv);
+        PV->HandleBlockMessage(pfrom, strCommand, block, inv);
     }
 
 
@@ -6807,7 +6819,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
         if (!filter.IsWithinSizeConstraints())
         {
             // There is no excuse for sending a too-large filter
-            dosMan.Misbehaving(pfrom->GetId(), 100);
+            dosMan.Misbehaving(pfrom, 100);
             return false;
         }
         else
@@ -6829,7 +6841,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
         // and thus, the maximum size any matched object can have) in a filteradd message
         if (vData.size() > MAX_SCRIPT_ELEMENT_SIZE)
         {
-            dosMan.Misbehaving(pfrom->GetId(), 100);
+            dosMan.Misbehaving(pfrom, 100);
         }
         else
         {
@@ -6837,7 +6849,7 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
             if (pfrom->pfilter)
                 pfrom->pfilter->insert(vData);
             else
-                dosMan.Misbehaving(pfrom->GetId(), 100);
+                dosMan.Misbehaving(pfrom, 100);
         }
     }
 
@@ -7172,7 +7184,7 @@ bool SendMessages(CNode *pto)
         }
 
         CNodeState &state = *State(pto->GetId());
-        if (state.fShouldBan)
+        if (pto->fShouldBan)
         {
             if (pto->fWhitelisted)
                 LogPrintf("Warning: not punishing whitelisted peer %s!\n", pto->addr.ToString());
@@ -7186,7 +7198,7 @@ bool SendMessages(CNode *pto)
                     dosMan.Ban(pto->addr, BanReasonNodeMisbehaving);
                 }
             }
-            state.fShouldBan = false;
+            pto->fShouldBan = false;
         }
 
         BOOST_FOREACH (const CBlockReject &reject, state.rejects)
@@ -7202,10 +7214,9 @@ bool SendMessages(CNode *pto)
             (!state.fFirstHeadersReceived) && !pto->fWhitelisted)
         {
             pto->fDisconnect = true;
-            dosMan.Ban(pto->addr, BanReasonNodeMisbehaving, 4 * 60 * 60); // ban for 4 hours
             LogPrintf(
-                "Banning %s because initial headers were either not received or not received before the timeout\n",
-                pto->addr.ToString());
+                "Initial headers were either not received or not received before the timeout - disconnecting peer=%s\n",
+                pto->GetLogName());
         }
 
         // Start block sync
@@ -7234,6 +7245,7 @@ bool SendMessages(CNode *pto)
                     state.fSyncStarted = true;
                     state.fSyncStartTime = GetTime();
                     state.fFirstHeadersReceived = false;
+                    state.nFirstHeadersExpectedHeight = pindexBestHeader->nHeight;
                     nSyncStarted++;
 
                     LogPrint("net", "initial getheaders (%d) to peer=%d (startheight:%d)\n", pindexStart->nHeight,

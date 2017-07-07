@@ -47,6 +47,18 @@
 
 std::vector<unsigned char> invalidOpReturn = {112, 101, 101, 114, 50, 112, 101, 101, 114, 32, 99, 97, 115, 104, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 108, 97, 114, 103, 101, 114, 32, 98, 108, 111, 99, 107, 115};
 
+bool UpdateBUIP055Globals(CBlockIndex *activeTip)
+{
+    if (activeTip)
+    {
+        if (activeTip->forkAtNextBlock(miningForkTime.value))
+        {
+            excessiveBlockSize = miningForkEB.value;
+            maxGeneratedBlock = miningForkMG.value;
+        }
+    }
+}
+
 bool ValidateBUIP055Block(const CBlock &block, CValidationState &state)
 {
     // Validate transactions are HF compatible
@@ -71,19 +83,28 @@ bool IsTxOpReturnInvalid(const CTransaction &tx)
     for (auto txout : tx.vout)
     {
         int idx = txout.scriptPubKey.Find(OP_RETURN);
-        if (idx < (int) txout.scriptPubKey.size())
+        if (idx)
         {
             CScript::const_iterator pc(txout.scriptPubKey.begin());
-            pc += idx;
             opcodetype op;
-            std::vector<unsigned char> data;
-            if (txout.scriptPubKey.GetOp(pc, op, data))
+            for (;pc != txout.scriptPubKey.end();)
             {
-                // Note this code only works if the size <= 75 (or we'd have OP_PUSHDATAn instead)
-                if (op == invalidOpReturn.size())
+                if (txout.scriptPubKey.GetOp(pc, op))
                 {
-                    if (data == invalidOpReturn)
-                        return true;
+                    if (op == OP_RETURN) break;
+                }
+            }
+            if (pc != txout.scriptPubKey.end())
+            {
+                std::vector<unsigned char> data;
+                if (txout.scriptPubKey.GetOp(pc, op, data))
+                {
+                    // Note this code only works if the size <= 75 (or we'd have OP_PUSHDATAn instead)
+                    if (op == invalidOpReturn.size())
+                    {
+                        if (data == invalidOpReturn)
+                            return true;
+                    }
                 }
             }
         }

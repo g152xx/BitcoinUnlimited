@@ -2919,6 +2919,7 @@ void static UpdateTip(CBlockIndex *pindexNew)
         Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), chainActive.Tip()),
         pcoinsTip->DynamicMemoryUsage() * (1.0 / (1 << 20)), pcoinsTip->GetCacheSize());
 
+    UpdateBUIP055Globals(pindexNew);
     cvBlockChange.notify_all();
 
     // Check the version of the last 100 blocks to see if we need to upgrade:
@@ -4072,7 +4073,7 @@ bool ContextualCheckBlock(const CBlock &block, CValidationState &state, CBlockIn
             return state.DoS(100,
                 error("%s: BUIP055 fork block (%s, height %d) must exceed %d, but this block is %d bytes", __func__,
                                  hash.ToString(), nHeight, BLOCKSTREAM_CORE_MAX_BLOCK_SIZE, block.nBlockSize),
-                REJECT_INVALID, "bad-fork-block");
+                REJECT_INVALID, "bad-blk-too-small");
         }
     }
     // BUIP055 check soft-fork items, such as tx targeted to the 1MB chain
@@ -4083,8 +4084,6 @@ bool ContextualCheckBlock(const CBlock &block, CValidationState &state, CBlockIn
 
     return true;
 }
-
-
 
 bool AcceptBlockHeader(const CBlockHeader &block,
     CValidationState &state,

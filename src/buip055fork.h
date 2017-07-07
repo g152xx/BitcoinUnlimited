@@ -1,3 +1,7 @@
+// Copyright (c) 2017 The Bitcoin Unlimited Developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
 #ifndef BUIP055FORK_H
 #define BUIP055FORK_H
 
@@ -14,4 +18,12 @@ extern bool ValidateBUIP055Tx(const CTransaction& tx);
 
 // Return true if this transaction is invalid on the BUIP055 fork due to a special OP_RETURN code
 extern bool IsTxOpReturnInvalid(const CTransaction &tx);
+
+// Update global variables based on whether the next block is the fork block
+extern bool UpdateBUIP055Globals(CBlockIndex *activeTip);
+
+extern CTweak<uint64_t> miningForkTime;
+extern CTweak<uint64_t> miningForkEB;
+extern CTweak<uint64_t> miningForkMG;
+
 #endif

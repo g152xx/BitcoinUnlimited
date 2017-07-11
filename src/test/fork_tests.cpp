@@ -11,8 +11,6 @@
 #include "net.h"
 #include "chainparams.h"
 
-using namespace std;
-
 
 BOOST_FIXTURE_TEST_SUITE(fork_test, TestingSetup)
 
@@ -48,7 +46,7 @@ BOOST_AUTO_TEST_CASE(fork_trigger)
 
     BOOST_CHECK(bi[SZ-1].forkActivated(1) == true);
     BOOST_CHECK(bi[SZ-1].forkAtNextBlock(1) == false);
-    
+
     BOOST_CHECK(bi[SZ-1].forkAtNextBlock(SZ-6) == true);
     BOOST_CHECK(bi[SZ-1].forkAtNextBlock(SZ-5) == false);
 

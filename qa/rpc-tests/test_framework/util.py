@@ -545,7 +545,7 @@ def split_transaction(node, prevouts, toAddrs, txfeePer=DEFAULT_TX_FEE_PER_BYTE,
           outp = {}
           if amount - Decimal(txfeePer*txLen) < 0:  # fee too big, find something smaller
             txfeePer = (float(amount)/txLen)/1.5
-          
+
           txfee = int(math.ceil(txfeePer*txLen))
           amtPer = (Decimal(amount-txfee)/len(toAddrs)).to_integral_value()
           # print "amount: ", amount, " amount per: ", amtPer, "from :", len(prevouts), "to: ", len(toAddrs), "tx fee: ", txfeePer, txfee

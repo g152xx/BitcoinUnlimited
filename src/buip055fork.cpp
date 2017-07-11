@@ -55,8 +55,10 @@ bool UpdateBUIP055Globals(CBlockIndex *activeTip)
         {
             excessiveBlockSize = miningForkEB.value;
             maxGeneratedBlock = miningForkMG.value;
+            return true;
         }
     }
+    return false;
 }
 
 bool ValidateBUIP055Block(const CBlock &block, CValidationState &state)

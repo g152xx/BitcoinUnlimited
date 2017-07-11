@@ -139,9 +139,6 @@ public:
     //! Verification status of this block. See enum BlockStatus
     unsigned int nStatus;
 
-    //! true if buip055 hard fork rules are active in this block.
-    // TODO NEEDED? bool largeBlkForkActive;
-
     //! block header
     int nVersion;
     uint256 hashMerkleRoot;
@@ -172,8 +169,6 @@ public:
         nTime          = 0;
         nBits          = 0;
         nNonce         = 0;
-
-        //TODO: largeBlkForkActive = false;
     }
 
     CBlockIndex()

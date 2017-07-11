@@ -1159,9 +1159,10 @@ bool AcceptToMemoryPoolWorker(CTxMemPool &pool,
     // This code uses the system time to determine when to start rejecting which is inaccurate relative to the
     // actual activation time (defined by times in the blocks).
     // But its ok to reject these transactions from the mempool a little early (or late).
-    if (start/1000000 >= miningForkTime.value)
+    if (start / 1000000 >= miningForkTime.value)
     {
-        if (!ValidateBUIP055Tx(tx)) return state.DoS(100, false, REJECT_INVALID, "wrong fork");
+        if (!ValidateBUIP055Tx(tx))
+            return state.DoS(100, false, REJECT_INVALID, "wrong fork");
     }
 
     // Rather not work on nonstandard transactions (unless -testnet/-regtest)
@@ -4012,8 +4013,8 @@ bool ContextualCheckBlockHeader(const CBlockHeader &block, CValidationState &sta
         if (block.GetAncestor(forkActivationHeight) != forkBlockHash)
             return state.Invalid(error("%s : rejected wrong fork block", __func__), REJECT_OBSOLETE, "wrong-fork");
     }
-#endif     
- 
+#endif
+
     return true;
 }
 
@@ -6389,8 +6390,8 @@ bool ProcessMessage(CNode *pfrom, std::string strCommand, CDataStream &vRecv, in
             // Headers message had its maximum size; the peer may have more headers.
             // TODO: optimize: if pindexLast is an ancestor of chainActive.Tip or pindexBestHeader, continue
             // from there instead.
-            LogPrint("net", "more getheaders (%d) to end to peer=%d (startheight:%d)\n", pindexLast->nHeight, pfrom->id,
-                pfrom->nStartingHeight);
+            LogPrint("net", "more getheaders (%d) to end to peer=%s (startheight:%d)\n", pindexLast->nHeight,
+                pfrom->GetLogName(), pfrom->nStartingHeight);
             pfrom->PushMessage(NetMsgType::GETHEADERS, chainActive.GetLocator(pindexLast), uint256());
         }
 
@@ -7247,8 +7248,8 @@ bool SendMessages(CNode *pto)
                     state.nFirstHeadersExpectedHeight = pindexBestHeader->nHeight;
                     nSyncStarted++;
 
-                    LogPrint("net", "initial getheaders (%d) to peer=%d (startheight:%d)\n", pindexStart->nHeight,
-                        pto->id, pto->nStartingHeight);
+                    LogPrint("net", "initial getheaders (%d) to peer=%s (startheight:%d)\n", pindexStart->nHeight,
+                        pto->GetLogName(), pto->nStartingHeight);
                     pto->PushMessage(NetMsgType::GETHEADERS, chainActive.GetLocator(pindexStart), uint256());
                 }
             }

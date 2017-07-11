@@ -6,9 +6,11 @@
 import time
 import shutil
 import random
+from binascii import hexlify
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
 from test_framework.util import *
+from test_framework.script import *
 from test_framework.blocktools import *
 import test_framework.script as script
 import pdb
@@ -16,6 +18,7 @@ import sys
 if sys.version_info[0] < 3: raise "Use Python 3"
 import logging
 logging.basicConfig(format='%(asctime)s.%(levelname)s: %(message)s', level=logging.INFO)
+
 
 class BUIP055Test (BitcoinTestFramework):
     def __init__(self,extended=False):
@@ -77,6 +80,13 @@ class BUIP055Test (BitcoinTestFramework):
           logging.info("sync all blocks and mempools")
           self.sync_all()
 
+    def wastefulOutput(self, btcAddress):
+        data = b"""this is junk data. this is junk data. this is junk data. this is junk data. this is junk data.
+this is junk data. this is junk data. this is junk data. this is junk data. this is junk data.
+this is junk data. this is junk data. this is junk data. this is junk data. this is junk data."""
+        ret = CScript([OP_PUSHDATA1, len(data), data, OP_DROP, OP_DUP, OP_HASH160, decodeBase58(btcAddress), OP_EQUALVERIFY, OP_CHECKSIG])
+        return ret
+
     def generateTx(self, node, txBytes, addrs):
         wallet = node.listunspent()
         wallet.sort(key=lambda x: x["amount"],reverse=False)
@@ -84,16 +94,24 @@ class BUIP055Test (BitcoinTestFramework):
 
         size = 0
         count = 0
+        decContext = decimal.getcontext().prec
+        decimal.getcontext().prec = 8 + 8 # 8 digits to get to 21million, and each bitcoin is 100 million satoshis
         while size < txBytes:
             count+=1
             utxo = wallet.pop()
             outp = {}
-            outp[addrs[count%len(addrs)]] = utxo["amount"]
+            payamt = satoshi_round(utxo["amount"]/decimal.Decimal(8.0))  # Make the tx bigger by adding addtl outputs so it validates faster
+            for x in range(0,8):
+                outp[addrs[(count+x)%len(addrs)]] = payamt  # its test code, I don't care if rounding error is folded into the fee
+                #outscript = self.wastefulOutput(addrs[(count+x)%len(addrs)])
+                #outscripthex = hexlify(outscript).decode("ascii")
+                #outp[outscripthex] = payamt
             txn = node.createrawtransaction([utxo], outp)
             signedtxn = node.signrawtransaction(txn)
             size += len(binascii.unhexlify(signedtxn["hex"]))
             node.sendrawtransaction(signedtxn["hex"])
         logging.info("%d tx %d length" % (count,size))
+        decimal.getcontext().prec = decContext
 
 
 
@@ -152,17 +170,18 @@ class BUIP055Test (BitcoinTestFramework):
         # TEST REQ-3: generate a large block
         logging.info("Building > 1MB block...")
 
-        self.generateTx(node, 1000001, addrs)
+        self.generateTx(node, 1005000, addrs)
         # if we don't sync mempools, when a block is created the system will be so busy syncing tx that it will time out
         # requesting the block, and so never receive it.
         # This only happens in testnet because there is only 1 node generating all the tx and with the block.
         sync_mempools(self.nodes[0:2])
 
+        commonAncestor = node.getbestblockhash()
         node.generate(1)
+        forkHeight = node.getblockcount()
 
         # Test that the forked nodes accept this block as the fork block
         sync_blocks(self.nodes[0:2])
-
         # counts = [ x.getblockcount() for x in self.nodes[0:2] ]
         counts = [ x.getblockcount() for x in self.nodes ]
         print(counts)
@@ -180,6 +199,8 @@ class BUIP055Test (BitcoinTestFramework):
         assert(counts == [218, 218, 223, 223])
         forkBest = self.nodes[0].getbestblockhash()
         origBest = self.nodes[3].getbestblockhash()
+        print("Fork height: %d" % forkHeight)
+        print("Common ancestor: %s" % commonAncestor)
         print("Fork tip: %s" % forkBest)
         print("Small block tip: %s" % origBest)
 
@@ -189,7 +210,6 @@ class BUIP055Test (BitcoinTestFramework):
         connect_nodes(self.nodes[2],3)
         connect_nodes(self.nodes[2],0)
         sync_blocks(self.nodes[0:2])
-#        print(self.nodes[2].getbestblockhash())
         assert(self.nodes[2].getbestblockhash() == origBest)
 
         # Now clean up the node to force a re-sync, but connect to the small block fork nodes
@@ -197,34 +217,33 @@ class BUIP055Test (BitcoinTestFramework):
         shutil.rmtree(self.options.tmpdir + os.sep + "node2" + os.sep + "regtest")
         self.nodes[2]=start_node(2, self.options.tmpdir, ["-debug", "-mining.forkTime=%d" % forkTime, "-mining.forkExcessiveBlock=9000000", "-mining.forkBlockSize=3000000"], timewait=900)
         connect_nodes(self.nodes[2],3)
-        time.sleep(10)
-#        print(self.nodes[2].getbestblockhash())
+        time.sleep(10) # I have to sleep here because I'm not expecting the nodes to sync
         t = self.nodes[2].getinfo()
-#        print(t)
-        assert(t["blocks"] == 211)  # Cannot progress beyond the fork block
+        assert(t["blocks"] == forkHeight-1)  # Cannot progress beyond the common ancestor, because we are looking for a big block
+        # TODO now connect to fork node to see it continue to sync
 
         # test full sync if only connected to forked nodes
         stop_node(self.nodes[2],2)
+        print("Resync to minority fork connected to minority fork nodes only")
+
         shutil.rmtree(self.options.tmpdir + os.sep + "node2" + os.sep + "regtest")
         self.nodes[2]=start_node(2, self.options.tmpdir, ["-debug", "-mining.forkTime=%d" % forkTime, "-mining.forkExcessiveBlock=9000000", "-mining.forkBlockSize=3000000"], timewait=900)
         connect_nodes(self.nodes[2],0)
         sync_blocks(self.nodes[0:3])
-#        print(self.nodes[2].getbestblockhash())
         t = self.nodes[2].getinfo()
         assert(self.nodes[2].getbestblockhash() == forkBest)
-#        print(t)
 
         # Now clean up the node to force a re-sync, but connect to both forks to prove it follows the proper fork
         stop_node(self.nodes[2],2)
+        print("Resync to minority fork in the presence of majority fork nodes")
         shutil.rmtree(self.options.tmpdir + os.sep + "node2" + os.sep + "regtest")
         self.nodes[2]=start_node(2, self.options.tmpdir, ["-debug", "-mining.forkTime=%d" % forkTime, "-mining.forkExcessiveBlock=9000000", "-mining.forkBlockSize=3000000"], timewait=900)
         connect_nodes(self.nodes[2],3)
         connect_nodes(self.nodes[2],0)
-        sync_blocks(self.nodes[0:2])
-        print(self.nodes[2].getbestblockhash())
-        # Bug: fails to proceed beyond fork point because nodes from both forks are available
-        # assert(self.nodes[2].getbestblockhash() == forkBest)
-        # pdb.set_trace()
+        sync_blocks(self.nodes[0:3])
+
+        assert(self.nodes[2].getbestblockhash() == forkBest)
+        #pdb.set_trace()
 
 
 def info(type, value, tb):

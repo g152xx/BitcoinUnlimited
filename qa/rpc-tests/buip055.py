@@ -106,6 +106,7 @@ this is junk data. this is junk data. this is junk data. this is junk data. this
                 #outscript = self.wastefulOutput(addrs[(count+x)%len(addrs)])
                 #outscripthex = hexlify(outscript).decode("ascii")
                 #outp[outscripthex] = payamt
+            outp["data"] ='54686973206973203830206279746573206f6620746573742064617461206372656174656420746f20757365207570207472616e73616374696f6e20737061636520666173746572202e2e2e2e2e2e2e'
             txn = node.createrawtransaction([utxo], outp)
             signedtxn = node.signrawtransaction(txn)
             size += len(binascii.unhexlify(signedtxn["hex"]))
@@ -121,7 +122,7 @@ this is junk data. this is junk data. this is junk data. this is junk data. this
         logging.info("Creating addresses...")
         self.nodes[0].keypoolrefill(NUM_ADDRS)
         addrs = [ self.nodes[0].getnewaddress() for _ in range(NUM_ADDRS)]
-        print("creating utxos")
+        logging.info("creating utxos")
 
         for j in range(0,5):
             self.createUtxos(self.nodes[0], addrs, 3000)
@@ -145,7 +146,7 @@ this is junk data. this is junk data. this is junk data. this is junk data. this
         counts = [ x.getblockcount() for x in self.nodes ]
         while counts[0] != 211:
             counts = [ x.getblockcount() for x in self.nodes ]
-            print(counts)
+            logging.info(counts)
             time.sleep(1)
 
         assert(counts[0] < counts[2])
@@ -158,7 +159,7 @@ this is junk data. this is junk data. this is junk data. this is junk data. this
 
         try:
             ret = node.generate(1)
-            print(ret)
+            logging.info(ret)
             assert(0) # should have raised exception
         except JSONRPCException as e:
             assert("bad-blk-too-small" in e.error["message"])
@@ -174,7 +175,7 @@ this is junk data. this is junk data. this is junk data. this is junk data. this
         # if we don't sync mempools, when a block is created the system will be so busy syncing tx that it will time out
         # requesting the block, and so never receive it.
         # This only happens in testnet because there is only 1 node generating all the tx and with the block.
-        sync_mempools(self.nodes[0:2])
+        sync_mempools(self.nodes[0:2],wait=10)
 
         commonAncestor = node.getbestblockhash()
         node.generate(1)
@@ -184,7 +185,7 @@ this is junk data. this is junk data. this is junk data. this is junk data. this
         sync_blocks(self.nodes[0:2])
         # counts = [ x.getblockcount() for x in self.nodes[0:2] ]
         counts = [ x.getblockcount() for x in self.nodes ]
-        print(counts)
+        logging.info(counts)
 
         # generate blocks and ensure that the other node syncs them
         self.nodes[1].generate(3)
@@ -199,10 +200,10 @@ this is junk data. this is junk data. this is junk data. this is junk data. this
         assert(counts == [218, 218, 223, 223])
         forkBest = self.nodes[0].getbestblockhash()
         origBest = self.nodes[3].getbestblockhash()
-        print("Fork height: %d" % forkHeight)
-        print("Common ancestor: %s" % commonAncestor)
-        print("Fork tip: %s" % forkBest)
-        print("Small block tip: %s" % origBest)
+        logging.info("Fork height: %d" % forkHeight)
+        logging.info("Common ancestor: %s" % commonAncestor)
+        logging.info("Fork tip: %s" % forkBest)
+        logging.info("Small block tip: %s" % origBest)
 
         # Limitation: fork logic won't cause a re-org if the node is beyond it
         stop_node(self.nodes[2],2)
@@ -224,7 +225,7 @@ this is junk data. this is junk data. this is junk data. this is junk data. this
 
         # test full sync if only connected to forked nodes
         stop_node(self.nodes[2],2)
-        print("Resync to minority fork connected to minority fork nodes only")
+        logging.info("Resync to minority fork connected to minority fork nodes only")
 
         shutil.rmtree(self.options.tmpdir + os.sep + "node2" + os.sep + "regtest")
         self.nodes[2]=start_node(2, self.options.tmpdir, ["-debug", "-mining.forkTime=%d" % forkTime, "-mining.forkExcessiveBlock=9000000", "-mining.forkBlockSize=3000000"], timewait=900)
@@ -235,7 +236,7 @@ this is junk data. this is junk data. this is junk data. this is junk data. this
 
         # Now clean up the node to force a re-sync, but connect to both forks to prove it follows the proper fork
         stop_node(self.nodes[2],2)
-        print("Resync to minority fork in the presence of majority fork nodes")
+        logging.info("Resync to minority fork in the presence of majority fork nodes")
         shutil.rmtree(self.options.tmpdir + os.sep + "node2" + os.sep + "regtest")
         self.nodes[2]=start_node(2, self.options.tmpdir, ["-debug", "-mining.forkTime=%d" % forkTime, "-mining.forkExcessiveBlock=9000000", "-mining.forkBlockSize=3000000"], timewait=900)
         connect_nodes(self.nodes[2],3)
@@ -244,6 +245,15 @@ this is junk data. this is junk data. this is junk data. this is junk data. this
 
         assert(self.nodes[2].getbestblockhash() == forkBest)
         #pdb.set_trace()
+
+        logging.info("Reindex across fork")
+        # see if we reindex properly across the fork
+        node = self.nodes[2]
+        curCount = node.getblockcount()
+        stop_node(node,2)
+        node = self.nodes[2]=start_node(2, self.options.tmpdir, ["-debug", "-reindex", "-checkblockindex=1", "-mining.forkTime=%d" % forkTime, "-mining.forkExcessiveBlock=9000000", "-mining.forkBlockSize=3000000"], timewait=900)
+        time.sleep(10)
+        assert_equal(node.getblockcount(), curCount)
 
 
 def info(type, value, tb):

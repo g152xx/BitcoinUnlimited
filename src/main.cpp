@@ -4065,7 +4065,7 @@ bool ContextualCheckBlock(const CBlock &block, CValidationState &state, CBlockIn
 
     // BUIP055 enforce that the fork block is > 1MB
     // (note subsequent blocks can be <= 1MB...)
-    if (pindexPrev->forkAtNextBlock(miningForkTime.value))
+    if (pindexPrev && pindexPrev->forkAtNextBlock(miningForkTime.value))
     {
         DbgAssert(block.nBlockSize, );
         if (block.nBlockSize <= BLOCKSTREAM_CORE_MAX_BLOCK_SIZE)
@@ -4078,7 +4078,7 @@ bool ContextualCheckBlock(const CBlock &block, CValidationState &state, CBlockIn
         }
     }
     // BUIP055 check soft-fork items, such as tx targeted to the 1MB chain
-    if (pindexPrev->IsforkActiveOnNextBlock(miningForkTime.value))
+    if (pindexPrev && pindexPrev->IsforkActiveOnNextBlock(miningForkTime.value))
     {
         return ValidateBUIP055Block(block, state);
     }
